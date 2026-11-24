@@ -48,10 +48,10 @@ Google sign-in only works on a page served over **https**. Opening `index.html` 
 3. Allow access to **Google Sheets** and **Google Drive**. The page needs Drive access to read the photos your nutritionist bot saves and to save the photos you upload.
 4. The page searches your Drive for a spreadsheet whose name contains **"Food & Weight Log"**. If it finds more than one, or none, it asks you to pick one or paste the sheet's URL. The choice is remembered only in that browser.
 
-**On iPhone:** open the page in Safari, tap **Share → Add to Home Screen**, and it opens like an app. Sign in once inside the home-screen app as well, because it keeps its own storage separate from Safari.
+**On iPhone:** open the page in Safari, tap **Share → Add to Home Screen**, and it opens like an app. Sign in once inside the home-screen app as well, because it keeps its own storage separate from Safari. Each one stays signed in for about an hour, then needs one tap.
 
 **Good to know**
 
-- Google's access tokens last about an hour. When one expires, the page shows **Reconnect**. One tap gets a new token, usually without asking you anything again.
+- You stay signed in on this device for about an hour. A few minutes before that, if the page is open, it shows **Session ending, tap to stay signed in**. After the hour, tap **Continue as** your account. One tap, and Google usually skips the account picker. The page will not open a sign-in window unless you tap.
 - In Testing mode, Google may ask you to approve access again about once a week. That's normal for unverified personal apps.
 - To remove access at any time, go to <https://myaccount.google.com/permissions>.
