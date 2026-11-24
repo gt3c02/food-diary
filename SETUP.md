@@ -30,6 +30,8 @@ const GOOGLE_CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
 
 and replace the placeholder with your Client ID. This is the only setting. The client ID is public (anyone who visits the page can see it), so it's fine to commit it. **Don't** put API keys, tokens, sheet IDs or any personal data in the repository.
 
+The client ID for this repository is already set in `index.html`.
+
 ## Part C: Put the page online with GitHub Pages
 
 Google sign-in only works on a page served over **https**. Opening `index.html` straight from your computer (`file://...`) won't work. The intended home is GitHub Pages on your account:
