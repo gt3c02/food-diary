@@ -116,3 +116,45 @@ test('monthly recap numbers', () => {
   assert.equal(rc.daysOnTarget, 1, '530 kcal on 5 Jan is within 450–550');
   assert.equal(rc.bestProteinDay.date, '2026-01-06'); assert.equal(rc.avgKcal, (530+1050)/2);
 });
+
+test('isDiaryHidden matches the no-diary-photo tag, comma or space separated, any case', () => {
+  assert.equal(C.isDiaryHidden({ meal_type:'lunch', tags:'no-diary-photo' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:'lunch', tags:'Rice, No-Diary-Photo' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:'dinner', tags:'spicy no-diary-photo extra' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:'lunch', tags:'foo,no-diary-photo,bar' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:'lunch', tags:'no-diary-photos' }), false);
+  assert.equal(C.isDiaryHidden({ meal_type:'lunch', tags:'rice bowl' }), false);
+  assert.equal(C.isDiaryHidden({ meal_type:'breakfast', tags:'' }), false);
+  assert.equal(C.isDiaryHidden({ meal_type:'drink', tags:'coffee' }), false);
+});
+
+test('isDiaryHidden matches meal_type snack, any case', () => {
+  assert.equal(C.isDiaryHidden({ meal_type:'snack', tags:'' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:'Snack', tags:'fruit' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:' SNACK ' }), true);
+  assert.equal(C.isDiaryHidden({ meal_type:'lunch', tags:'' }), false);
+  assert.equal(C.isDiaryHidden({ meal_type:'breakfast' }), false);
+});
+
+test('totals still include diary-hidden rows', () => {
+  const h = C.HEADER.slice();
+  const rows = [h,
+    row(h,{entry_id:'a', item:'Oats', date:'2026-01-05', time:'08:30', meal_type:'breakfast', kcal:400, protein_g:20}),
+    row(h,{entry_id:'2026-11-24_1116_snack_k1_1', item:'Crackers', date:'2026-01-05', time:'11:16', meal_type:'snack', kcal:180, protein_g:3}),
+    row(h,{entry_id:'c', item:'Secret lunch', date:'2026-01-05', time:'12:30', meal_type:'lunch', kcal:50, protein_g:2, tags:'no-diary-photo'}),
+    row(h,{entry_id:'d', item:'Gone', date:'2026-01-05', time:'13:00', meal_type:'snack', kcal:999, protein_g:99, deleted:'TRUE'}),
+  ];
+  const p = C.parseFoodLog(rows);
+  const live = p.entries.filter(e => !e.deleted);
+  assert.equal(live.filter(C.isDiaryHidden).length, 2);
+  assert.equal(live.filter(e => !C.isDiaryHidden(e)).map(e => e.item).join(), 'Oats');
+  const t = C.sumTotals(p.entries);
+  assert.equal(t.kcal, 630); assert.equal(t.protein_g, 25); assert.equal(t.count, 3);
+  const by = C.groupByDate(p.entries);
+  assert.equal(by['2026-01-05'].length, 3, 'hidden rows stay in the day group used for totals');
+  assert.equal(C.sumTotals(by['2026-01-05']).kcal, 630);
+  const rc = C.monthRecap(p.entries, [], '2026-01');
+  assert.equal(rc.totals.kcal, 630); assert.equal(rc.avgKcal, 630); assert.equal(rc.items, 1); assert.equal(rc.photos, 0);
+  const shown = C.monthRecap(p.entries, [], '2026-01', true);
+  assert.equal(shown.totals.kcal, 630); assert.equal(shown.items, 3);
+});
