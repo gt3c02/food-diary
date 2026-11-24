@@ -276,6 +276,12 @@ const FoodCore = (() => {
   function diffEntry(orig, edited){ const ch={}; for (const k of HEADER){ if (k==='entry_id'||k==='updated_at'||k==='updated_by') continue; if (!(k in edited)) continue; const a=orig?orig[k]:undefined, b=edited[k]; const norm=x=> (x===null||x===undefined)?'':(typeof x==='boolean'?String(x):String(x)); if (NUM_FIELDS.includes(k)){ if ((a??null)!==(b??null)) ch[k]=b; } else if (norm(a)!==norm(b)) ch[k]=b; } return ch; }
 
   const visible = es => es.filter(e=>!e.deleted);
+  /** Diary photos and lists skip these; kcal and macro totals still include them. Tag match is comma- or space-separated. */
+  function isDiaryHidden(e){
+    if (!e) return false;
+    if (String(e.meal_type ?? '').trim().toLowerCase() === 'snack') return true;
+    return String(e.tags ?? '').toLowerCase().split(/[\s,]+/).filter(Boolean).includes('no-diary-photo');
+  }
   function sumTotals(es){ const t={count:0}; for (const k of NUM_FIELDS) t[k]=0; for (const e of visible(es)){ t.count++; for (const k of NUM_FIELDS) t[k]+= (e[k]||0); } return t; }
   function groupByDate(es){ const m={}; for (const e of visible(es)) (m[e.date] ||= []).push(e); for (const d in m) m[d].sort((a,b)=> (a.time||'').localeCompare(b.time||'') || MEALS.indexOf(a.meal_type)-MEALS.indexOf(b.meal_type)); return m; }
 
@@ -311,28 +317,29 @@ const FoodCore = (() => {
   const daysInMonth = mk => { const [y,m]=mk.split('-').map(Number); return new Date(Date.UTC(y,m,0)).getUTCDate(); };
   const addMonths = (mk,n) => { const [y,m]=mk.split('-').map(Number); const d=new Date(Date.UTC(y,m-1+n,1)); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}`; };
 
-  function monthRecap(entries, targets, mk){
+  function monthRecap(entries, targets, mk, showHidden){
     const es=visible(entries).filter(e=>monthKey(e.date)===mk);
+    const diary = showHidden ? es : es.filter(e => !isDiaryHidden(e));
     const byDay=groupByDate(es); const days=Object.keys(byDay).sort();
-    const occasions=new Set(es.map(e=>`${e.date}|${e.meal_type}|${e.photo_file_id||e.time}`));
-    const occSrc={}; for (const e of es){ const k=`${e.date}|${e.meal_type}|${e.photo_file_id||e.time}`; if (!occSrc[k]) occSrc[k]=e.source; }
+    const occasions=new Set(diary.map(e=>`${e.date}|${e.meal_type}|${e.photo_file_id||e.time}`));
+    const occSrc={}; for (const e of diary){ const k=`${e.date}|${e.meal_type}|${e.photo_file_id||e.time}`; if (!occSrc[k]) occSrc[k]=e.source; }
     const src={home:0,out:0,take:0,other:0}; for (const s of Object.values(occSrc)){ const v=String(s).toLowerCase(); if (/home/.test(v)) src.home++; else if (/take/.test(v)) src.take++; else if (/out|restaurant|cafe/.test(v)) src.out++; else src.other++; }
     const count=(arr)=>{ const m={}; for (const x of arr) if (x) m[x]=(m[x]||0)+1; return Object.entries(m).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])); };
-    const cuisines=count(es.map(e=>e.cuisine.trim().toLowerCase()));
-    const tags=count(es.flatMap(e=>splitTags(e.tags).map(t=>t.toLowerCase())));
-    const homeDishes=count(es.filter(e=>/home/i.test(e.source)).map(e=>e.item));
+    const cuisines=count(diary.map(e=>e.cuisine.trim().toLowerCase()));
+    const tags=count(diary.flatMap(e=>splitTags(e.tags).map(t=>t.toLowerCase())));
+    const homeDishes=count(diary.filter(e=>/home/i.test(e.source)).map(e=>e.item));
     const perDay=days.map(d=>{ const t=sumTotals(byDay[d]); const tg=targetFor(d,targets); return {date:d, ...t, target:tg, status:kcalStatus(t.kcal,tg)}; });
     const best=perDay.reduce((a,b)=> (!a||b.protein_g>a.protein_g)?b:a, null);
     const tot=sumTotals(es);
-    const photos=new Set(es.map(e=>e.photo_file_id).filter(Boolean));
-    return { month:mk, items:es.length, meals:occasions.size, photos:photos.size, daysLogged:days.length,
+    const photos=new Set(diary.map(e=>e.photo_file_id).filter(Boolean));
+    return { month:mk, items:diary.length, meals:occasions.size, photos:photos.size, daysLogged:days.length,
       daysOnTarget:perDay.filter(p=>p.status==='on').length, proteinDaysHit:perDay.filter(p=>p.protein_g>=p.target.protein_g).length,
       avgKcal: days.length? tot.kcal/days.length : 0, avgProtein: days.length? tot.protein_g/days.length : 0,
       totals:tot, targetKcalSum: perDay.reduce((s,p)=>s+p.target.kcal,0), source:src, cuisines, tags, homeDishes, bestProteinDay:best, perDay,
       alcoholUnits: tot.alcohol_units };
   }
   return { HEADER, NUM_FIELDS, MEALS, SOURCES, REQUIRED_FOR_WRITE, DEFAULT_TARGET, normHeader, buildColMap, parseNum, parseDate, parseTime, parseBool, normMeal, splitTags,
-    rowToEntry, parseFoodLog, entryToRow, applyChanges, findRowByEntryId, diffEntry, visible, sumTotals, groupByDate, parseTargets, targetFor, kcalStatus, parseWeights,
+    rowToEntry, parseFoodLog, entryToRow, applyChanges, findRowByEntryId, diffEntry, visible, isDiaryHidden, sumTotals, groupByDate, parseTargets, targetFor, kcalStatus, parseWeights,
     londonParts, ukStamp, photoPrefix, nextN, photoName, entryIdFor, addDays, weekStart, monthKey, daysInMonth, addMonths, monthRecap, pad };
 })();
 if (typeof globalThis!=='undefined') globalThis.FoodCore = FoodCore;
@@ -347,7 +354,7 @@ const PHOTO_FOLDER = 'Food Diary Photos';
 const TABS = { food:'Food log', targets:'Targets', weight:'Weight' };
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive';
 const PHOTO_MAX_PX = 1280, PHOTO_QUALITY = 0.75, THUMB_PX = 360;
-const LS = { token:'fd.token', sheet:'fd.sheetId', sheetName:'fd.sheetName', folder:'fd.folderId', theme:'fd.theme', editor:'fd.editor' };
+const LS = { token:'fd.token', sheet:'fd.sheetId', sheetName:'fd.sheetName', folder:'fd.folderId', theme:'fd.theme', editor:'fd.editor', showHidden:'fd.showHidden' };
 const MEAL_ICON = { breakfast:'🌅', lunch:'🍱', dinner:'🍲', snack:'🍡', drink:'🍵' };
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -497,6 +504,10 @@ const Demo = (() => {
           rows.push(C.entryToRow(e, header)); });
       }
     }
+    // Always on today, with no photo: hidden from the diary, still in the day's kcal.
+    rows.push(C.entryToRow({ entry_id:`${t}_1116_snack_k1_1`, date:t, time:'11:16', meal_type:'snack', item:'Rice crackers', portion:'1 small pack',
+      kcal:180, protein_g:3, carbs_g:32, fat_g:4, fibre_g:1, sugar_g:2, sodium_mg:280, alcohol_units:0, source:'home-cooked', cuisine:'', location:'Home', tags:'no-diary-photo', notes:'',
+      photo_file_id:'', photo_name:'', updated_at:stamp, updated_by:'demo-user', deleted:'' }, header));
     const tg=[['Effective from','kcal target','kcal min','kcal max','Protein g','Fat g (approx)','Fibre g','Sodium max mg','Notes'],[C.addDays(t,-60),2200,2100,2300,120,70,30,2300,'Sample target'],[C.addDays(t,10),2000,1900,2100,120,65,30,2300,'Sample target'],[],['Profile and plan notes'],['Start weight','~80 kg'],['Goal weight','74 kg']];
     const wt=[['Date','Weight kg']]; let w=80.4; for (let d=C.addDays(t,-48); d<=t; d=C.addDays(d,3)){ w+= -0.18 + (r()-0.5)*0.5; wt.push([d, Math.round(w*10)/10]); }
     mem={ food:rows, targets:tg, weight:wt };
@@ -648,20 +659,23 @@ function menuHTML(){
   const th=localStorage.getItem(LS.theme)||'auto';
   return `<div class="menu" id="menu">
     <button data-act="theme">🌓 Theme: ${th==='auto'?'Auto':th==='dark'?'Dark':'Light'}</button>
+    <button data-act="showhidden" aria-pressed="${showHiddenSnacks()}">Show hidden snacks: ${showHiddenSnacks()?'On':'Off'}</button>
     ${S.mode==='google'?`<button data-act="opensheet">📗 Open the sheet</button><button data-act="changesheet">🔁 Use a different sheet</button><button data-act="editor">✍️ Editor name: ${esc(editorTag())}</button><button data-act="clearcache">🧹 Clear photo cache</button><button data-act="signout">🚪 Sign out</button>`:`<button data-act="exitdemo">🚪 Leave demo</button>`}
     <div class="faint">${S.mode==='google'?esc(localStorage.getItem(LS.sheetName)||''):'Sample data only'}</div></div>`;
 }
 
 /* --- shared bits --- */
 const dayTotals = d => C.sumTotals(S.data.byDate[d]||[]);
+const showHiddenSnacks = () => localStorage.getItem(LS.showHidden)==='1';
+const diaryEntries = es => showHiddenSnacks() ? es : es.filter(e => !C.isDiaryHidden(e));
 const tgt = d => C.targetFor(d, S.data.targets);
 const stColor = st => ({on:'var(--good)',under:'var(--warn)',over:'var(--bad)',none:'var(--ink3)'}[st]);
 const stat=(n,l)=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
 const cap=s=>String(s).charAt(0).toUpperCase()+String(s).slice(1);
 const narrow=()=>window.innerWidth<420;
 function navRow(title, sub, prev, next){ return `<div class="navrow"><button class="iconbtn" data-act="${prev}" aria-label="Previous">‹</button><h2>${title}${sub?`<small>${sub}</small>`:''}</h2><button class="iconbtn" data-act="${next}" aria-label="Next">›</button></div>`; }
-function firstPhoto(d){ const es=S.data.byDate[d]||[]; const f=es.find(e=>e.photo_file_id && e.meal_type!=='drink')||es.find(e=>e.photo_file_id); return f?.photo_file_id; }
-function photosOn(d){ return [...new Set((S.data.byDate[d]||[]).map(e=>e.photo_file_id).filter(Boolean))]; }
+function firstPhoto(d){ const es=diaryEntries(S.data.byDate[d]||[]); const f=es.find(e=>e.photo_file_id && e.meal_type!=='drink')||es.find(e=>e.photo_file_id); return f?.photo_file_id; }
+function photosOn(d){ return [...new Set(diaryEntries(S.data.byDate[d]||[]).map(e=>e.photo_file_id).filter(Boolean))]; }
 
 /* --- calendar --- */
 function calendarHTML(){
@@ -672,7 +686,7 @@ function calendarHTML(){
     cells+=`<button class="day ${inM?'':'out'} ${fid?'hasph':''} ${d===td?'today':''}" data-act="openday" data-d="${d}" aria-label="${dLabel(d)}">${fid?imgTag(fid)+'<div class="shade"></div>':''}
       <span class="num">${+d.slice(8)}</span>${np>1?`<span class="cnt">${np}</span>`:''}
       ${t.count?`<span class="kc">${fmt(t.kcal)}</span><span class="bar"><i class="st-${st}" style="width:${Math.min(100,t.kcal/tg.kcal*100)}%"></i></span>`:''}</button>`; }
-  const rc=C.monthRecap(S.data.entries,S.data.targets,mk);
+  const rc=C.monthRecap(S.data.entries,S.data.targets,mk,showHiddenSnacks());
   return navRow(mLabel(mk),'Photo calendar','prevmonth','nextmonth')+`<div class="cal">${cells}</div>
     <div class="legend"><span><i class="st-on"></i>On target</span><span><i class="st-under"></i>Under</span><span><i class="st-over"></i>Over</span><span class="faint">Bar = kcal vs daily target</span></div>
     <div class="card" style="margin-top:14px"><h3>${mLabel(mk).split(' ')[0]} at a glance</h3><div class="stats">
@@ -687,8 +701,9 @@ function ring(val, target, color, label){ const r=52, c=2*Math.PI*r, p=Math.min(
 function mrow(label, val, target, color, unit, note){ const w = target ? Math.min(100,(val||0)/target*100) : 0; const u = unit==='u'?' u':unit;
   return `<div class="mrow"><span>${label}</span><div class="track">${target?`<i style="width:${w}%;background:${color}"></i>`:''}</div><span class="v">${fmt(val, unit==='u'?1:0)}${u}${target?` / ${fmt(target)}${u}`:''}${note?` <span class="faint">${note}</span>`:''}</span></div>`; }
 function dayHTML(){
-  const d=S.date, es=S.data.byDate[d]||[], t=C.sumTotals(es), tg=tgt(d), st=C.kcalStatus(t.kcal,tg);
+  const d=S.date, es=S.data.byDate[d]||[], shown=diaryEntries(es), t=C.sumTotals(es), tg=tgt(d), st=C.kcalStatus(t.kcal,tg);
   const carbPct = t.kcal ? Math.round(t.carbs_g*4/t.kcal*100) : 0;
+  const hiddenN = es.length - shown.length;
   const statusTxt = {on:'On target 🎯', under:`${fmt(tg.kcal_min-t.kcal)} kcal under the range`, over:`${fmt(t.kcal-tg.kcal_max)} kcal over the range`, none:'Nothing logged yet'}[st];
   let h=navRow(dLabel(d,{weekday:'long',day:'numeric',month:'long'}), d===today()?'Today':d.slice(0,4),'prevday','nextday');
   h+=`<div class="card"><div class="rings">${ring(t.kcal,tg.kcal,stColor(st),'kcal')}<div class="macros">
@@ -699,9 +714,11 @@ function dayHTML(){
       ${mrow('Sugar',t.sugar_g,null,'var(--sugar)','g')}
       ${mrow('Sodium',t.sodium_mg,tg.sodium_max_mg,t.sodium_mg>(tg.sodium_max_mg||1e9)?'var(--bad)':'var(--sodium)','mg')}
       ${mrow('Alcohol',t.alcohol_units,null,'var(--alcohol)','u')}</div></div>
-      <div style="margin-top:10px;font-size:13px;font-weight:700;color:${stColor(st)}">${statusTxt} <span class="faint" style="font-weight:600">· range ${fmt(tg.kcal_min)}–${fmt(tg.kcal_max)} kcal${t.protein_g>=tg.protein_g?' · protein hit 💪':''}</span></div></div>`;
-  if (!es.length) return h+`<div class="empty"><div class="big">🍽️</div><p>No food logged on this day.</p><button class="btn primary" data-act="add">+ Add an entry</button></div>`;
-  for (const m of C.MEALS){ const me=es.filter(e=>e.meal_type===m); if(!me.length) continue; const mt=C.sumTotals(me);
+      <div style="margin-top:10px;font-size:13px;font-weight:700;color:${stColor(st)}">${statusTxt} <span class="faint" style="font-weight:600">· range ${fmt(tg.kcal_min)}–${fmt(tg.kcal_max)} kcal${t.protein_g>=tg.protein_g?' · protein hit 💪':''}${hiddenN?` · includes ${hiddenN} hidden from the diary`:''}</span></div></div>`;
+  if (!shown.length) return h+(!es.length
+    ? `<div class="empty"><div class="big">🍽️</div><p>No food logged on this day.</p><button class="btn primary" data-act="add">+ Add an entry</button></div>`
+    : `<div class="empty"><div class="big">🍡</div><p>Snacks on this day are hidden. They’re still in the totals above.</p><p class="faint">Turn on “Show hidden snacks” in the ⋯ menu to see or edit them.</p></div>`);
+  for (const m of C.MEALS){ const me=shown.filter(e=>e.meal_type===m); if(!me.length) continue; const mt=C.sumTotals(me);
     h+=`<section class="meal"><div class="meal-h"><h3>${MEAL_ICON[m]} ${m}</h3><span class="faint">${fmt(mt.kcal)} kcal · ${fmt(mt.protein_g)} g protein</span></div>`;
     const groups=[]; const idx={}; for (const e of me){ const k=e.photo_file_id||('np:'+e.entry_id); if(!(k in idx)){ idx[k]=groups.length; groups.push([]);} groups[idx[k]].push(e); }
     for (const g of groups){ const fid=g[0].photo_file_id;
@@ -763,7 +780,7 @@ function weekHTML(){
     ${stat(fmt(avg('carbs_g'))+'g','avg carbs')}${stat(fmt(avg('fat_g'))+'g','avg fat')}${stat(fmt(avg('fibre_g'))+'g','avg fibre')}${stat(fmt(logged.reduce((s,d)=>s+d.v.alcohol_units,0),1)+' u','alcohol (week)')}</div>
     <table class="tv" style="margin-top:12px"><tr><th>Day</th><th>kcal</th><th>Target</th><th>Protein</th><th>Carbs</th><th>Fat</th><th>Sodium</th></tr>
     ${days.map(d=>`<tr data-act="openday" data-d="${d.date}" style="cursor:pointer"><td>${dLabel(d.date,{weekday:'short',day:'numeric'})}</td><td style="color:${d.v.count?stColor(C.kcalStatus(d.v.kcal,d.t)):'inherit'};font-weight:700">${d.v.count?fmt(d.v.kcal):'–'}</td><td class="faint">${fmt(d.t.kcal)}</td><td>${d.v.count?fmt(d.v.protein_g)+'g':'–'}</td><td>${d.v.count?fmt(d.v.carbs_g)+'g':'–'}</td><td>${d.v.count?fmt(d.v.fat_g)+'g':'–'}</td><td>${d.v.count?fmt(d.v.sodium_mg):'–'}</td></tr>`).join('')}</table></div>`;
-  const ph=[]; days.forEach(d=>{ const seen=new Set(); for (const e of S.data.byDate[d.date]||[]) if (e.photo_file_id && !seen.has(e.photo_file_id)){ seen.add(e.photo_file_id); ph.push(e); } });
+  const ph=[]; days.forEach(d=>{ const seen=new Set(); for (const e of diaryEntries(S.data.byDate[d.date]||[])) if (e.photo_file_id && !seen.has(e.photo_file_id)){ seen.add(e.photo_file_id); ph.push(e); } });
   h+=`<div class="card"><h3>This week's plates</h3>${ph.length?`<div class="strip">${ph.map(e=>`<button data-act="openday" data-d="${e.date}">${imgTag(e.photo_file_id,'thumb','',e.item)}<span>${dLabel(e.date,{weekday:'short'})} · ${esc(e.meal_type)}</span></button>`).join('')}</div>`:'<p class="faint">No photos this week yet.</p>'}</div>`;
   return h;
 }
@@ -772,12 +789,12 @@ function weekHTML(){
 function avgT(rc,k){ const v=rc.perDay.map(p=>p.target[k]).filter(x=>x!==null&&x!==undefined); return v.length? v.reduce((a,b)=>a+b,0)/v.length : null; }
 function tvRow(l,a,t,u,higherGood){ let ok=''; if (t){ const r=a/t; ok = higherGood===undefined ? (r>1.03?'🔺':r<0.97?'🔻':'✅') : higherGood ? (r>=0.95?'✅':'🔻') : (r<=1?'✅':'🔺'); } return `<tr><td>${l}</td><td><b>${fmt(a)}${u}</b></td><td class="faint">${t?fmt(t)+u:'–'}</td><td>${ok}</td></tr>`; }
 function monthHTML(){
-  const mk=S.month, rc=C.monthRecap(S.data.entries,S.data.targets,mk), name=mLabel(mk).split(' ')[0];
+  const mk=S.month, rc=C.monthRecap(S.data.entries,S.data.targets,mk,showHiddenSnacks()), name=mLabel(mk).split(' ')[0];
   let h=navRow(mLabel(mk),'Monthly recap','prevmonth','nextmonth');
-  if (!rc.items) return h+`<div class="empty"><div class="big">🗓️</div><p>Nothing logged in ${name} yet.</p></div>`;
+  if (!rc.daysLogged) return h+`<div class="empty"><div class="big">🗓️</div><p>Nothing logged in ${name} yet.</p></div>`;
   const s=rc.source, sTot=(s.home+s.out+s.take+s.other)||1; const homePct=Math.round(s.home/sTot*100);
   const topC=rc.cuisines[0], topDish=rc.homeDishes[0], best=rc.bestProteinDay;
-  const photos=[]; const seen=new Set(); for (const e of C.visible(S.data.entries).filter(e=>e.date.startsWith(mk)).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time))) if (e.photo_file_id && !seen.has(e.photo_file_id)){ seen.add(e.photo_file_id); photos.push(e); }
+  const photos=[]; const seen=new Set(); for (const e of diaryEntries(C.visible(S.data.entries).filter(e=>e.date.startsWith(mk))).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time))) if (e.photo_file_id && !seen.has(e.photo_file_id)){ seen.add(e.photo_file_id); photos.push(e); }
   const fun=[`🏠 <b>${homePct}%</b> of meals were home-cooked${s.out+s.take?`, with ${s.out} eaten out and ${s.take} takeaway${s.take===1?'':'s'}`:''}.`];
   if (topC) fun.push(`🥢 Favourite cuisine: <b>${esc(cap(topC[0]))}</b> (${topC[1]} dishes).`);
   if (topDish && topDish[1]>1) fun.push(`👨‍🍳 Most-cooked at home: <b>${esc(topDish[0])}</b> ×${topDish[1]}.`);
@@ -912,6 +929,7 @@ document.addEventListener('click', async ev=>{
     case 'edit': { const e=S.data.entries.find(x=>x.entry_id===el.dataset.id); if (e) openEditor(e); return; }
     case 'menu': S.menu=!S.menu; return render();
     case 'theme': { const order=['auto','light','dark']; const c=localStorage.getItem(LS.theme)||'auto'; localStorage.setItem(LS.theme, order[(order.indexOf(c)+1)%3]); applyTheme(); S.menu=true; return render(); }
+    case 'showhidden': localStorage.setItem(LS.showHidden, showHiddenSnacks()?'0':'1'); S.menu=true; return render();
     case 'opensheet': window.open(`https://docs.google.com/spreadsheets/d/${encodeURIComponent(Google.sheetId())}/edit`,'_blank','noopener'); return;
     case 'changesheet': { localStorage.removeItem(LS.sheet); const id=await chooseSheet().catch(e=>{ if(e.needAuth) onNeedAuth(); return null; }); return id ? refresh() : render(); }
     case 'editor': { const v=prompt('Name written to the updated_by column when you edit (e.g. your first name):', editorTag()); if (v&&v.trim()) localStorage.setItem(LS.editor, v.trim().toLowerCase()); return render(); }
