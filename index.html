@@ -46,6 +46,7 @@ button{cursor:pointer}
 .navrow h2 small{display:block;font-size:12.5px;font-weight:600;color:var(--ink3);letter-spacing:0}
 .demo-banner{background:repeating-linear-gradient(-45deg,var(--warn-soft),var(--warn-soft) 10px,color-mix(in srgb,var(--warn-soft) 70%,var(--bg)) 10px,color-mix(in srgb,var(--warn-soft) 70%,var(--bg)) 20px);color:var(--ink);border:1px dashed var(--warn);border-radius:12px;padding:7px 12px;font-size:13px;font-weight:600;margin:4px 0 10px;text-align:center}
 .notice{background:var(--accent-soft);border-radius:12px;padding:9px 12px;font-size:13px;margin:4px 0 10px}
+button.notice{display:block;width:100%;text-align:left;border:0;font:inherit;font-weight:700;color:inherit;cursor:pointer}
 .notice.err{background:var(--bad-soft)}
 .card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px;margin-bottom:12px}
 .card h3{margin:0 0 10px;font-size:16px;letter-spacing:-.2px}
@@ -338,9 +339,50 @@ const FoodCore = (() => {
       totals:tot, targetKcalSum: perDay.reduce((s,p)=>s+p.target.kcal,0), source:src, cuisines, tags, homeDishes, bestProteinDay:best, perDay,
       alcoholUnits: tot.alcohol_units };
   }
+
+  /** Usable only with more than this left, so a call doesn't die mid-request. */
+  const TOKEN_SKEW_MS = 2 * 60 * 1000;
+  /** Show the one-tap banner while the page is open and this close to expiry. */
+  const TOKEN_WARN_MS = 5 * 60 * 1000;
+  function saveToken(response, now, email){
+    const raw = Number(response && response.expires_in);
+    const secs = Number.isFinite(raw) && raw > 0 ? raw : 3600;
+    const scope = response && (response.scope || response.scopes) || '';
+    return {
+      access_token: String(response && response.access_token || ''),
+      exp: now + secs * 1000,
+      scopes: Array.isArray(scope) ? scope.join(' ') : String(scope),
+      email: String(email || '').trim()
+    };
+  }
+  /** Access token string, or null when missing or inside the expiry skew. Accepts the legacy `token` field. */
+  function readToken(record, now, skewMs = TOKEN_SKEW_MS){
+    if (!record || typeof record !== 'object') return null;
+    const token = String(record.access_token || record.token || '');
+    const exp = Number(record.exp);
+    if (!token || !Number.isFinite(exp) || !(exp > now + skewMs)) return null;
+    return token;
+  }
+  /** True in the last few minutes before the real expiry, including inside the skew window. */
+  function tokenWarning(record, now, warnMs = TOKEN_WARN_MS){
+    if (!record || typeof record !== 'object') return false;
+    const token = String(record.access_token || record.token || '');
+    const exp = Number(record.exp);
+    if (!token || !Number.isFinite(exp)) return false;
+    const left = exp - now;
+    return left > 0 && left <= warnMs;
+  }
+  /** Full clear for sign-out. Pass keepEmail to drop the access token but remember the login hint. */
+  function clearToken(record, keepEmail){
+    if (!keepEmail) return null;
+    const email = record && String(record.email || '').trim();
+    if (!email) return null;
+    return { access_token:'', exp:0, scopes:'', email };
+  }
   return { HEADER, NUM_FIELDS, MEALS, SOURCES, REQUIRED_FOR_WRITE, DEFAULT_TARGET, normHeader, buildColMap, parseNum, parseDate, parseTime, parseBool, normMeal, splitTags,
     rowToEntry, parseFoodLog, entryToRow, applyChanges, findRowByEntryId, diffEntry, visible, isDiaryHidden, sumTotals, groupByDate, parseTargets, targetFor, kcalStatus, parseWeights,
-    londonParts, ukStamp, photoPrefix, nextN, photoName, entryIdFor, addDays, weekStart, monthKey, daysInMonth, addMonths, monthRecap, pad };
+    londonParts, ukStamp, photoPrefix, nextN, photoName, entryIdFor, addDays, weekStart, monthKey, daysInMonth, addMonths, monthRecap, pad,
+    TOKEN_SKEW_MS, TOKEN_WARN_MS, saveToken, readToken, tokenWarning, clearToken };
 })();
 if (typeof globalThis!=='undefined') globalThis.FoodCore = FoodCore;
 </script>
@@ -364,7 +406,7 @@ const dLabel = (s, opt={weekday:'short', day:'numeric', month:'short'}) => new D
 const mLabel = mk => new Date(mk+'-15T12:00:00Z').toLocaleDateString('en-GB',{month:'long', year:'numeric', timeZone:'UTC'});
 const params = new URLSearchParams(location.search);
 
-const S = { mode:null, view:'calendar', date:today(), month:today().slice(0,7), raw:null, data:null, loading:false, notice:null, needAuth:false, menu:false, offline:false };
+const S = { mode:null, view:'calendar', date:today(), month:today().slice(0,7), raw:null, data:null, loading:false, notice:null, needAuth:false, sessionEnding:false, menu:false, offline:false };
 
 /* ---------- theme ---------- */
 function applyTheme(){ const t=localStorage.getItem(LS.theme)||'auto'; const dark = t==='dark' || (t==='auto' && matchMedia('(prefers-color-scheme: dark)').matches); document.documentElement.dataset.theme = dark?'dark':'light'; }
@@ -397,20 +439,36 @@ const compressPhoto = file => resizeBlob(file, PHOTO_MAX_PX, PHOTO_QUALITY);
 /* ---------- Google auth (GIS token client) ---------- */
 const Auth = {
   client:null, pending:null,
-  saved(){ try{ const t=JSON.parse(localStorage.getItem(LS.token)||'null'); return (t && t.exp > Date.now()+60000) ? t.token : null; }catch(e){ return null; } },
-  clear(){ localStorage.removeItem(LS.token); },
+  record(){ try{ return JSON.parse(localStorage.getItem(LS.token)||'null'); }catch(e){ return null; } },
+  saved(){ return C.readToken(this.record(), Date.now()); },
+  email(){ const r=this.record(); return r && r.email ? String(r.email) : ''; },
+  write(rec){ if (rec) localStorage.setItem(LS.token, JSON.stringify(rec)); else localStorage.removeItem(LS.token); },
+  clear(){ clearTimeout(this._warnTimer); clearTimeout(this._expTimer); this.write(null); S.sessionEnding=false; },
+  /** 401 or real expiry: drop the access token, keep the email for one-tap continue. */
+  invalidate(){ clearTimeout(this._warnTimer); clearTimeout(this._expTimer); this.write(C.clearToken(this.record(), true)); S.sessionEnding=false; },
   loadGis(){ if (window.google?.accounts?.oauth2) return Promise.resolve(); if (this._gis) return this._gis;
     return this._gis = new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='https://accounts.google.com/gsi/client'; s.async=true; s.onload=()=>res(); s.onerror=()=>{ this._gis=null; rej(new Error('Could not load Google sign-in (offline?)')); }; document.head.appendChild(s); }); },
   async init(){ await this.loadGis(); if (this.client) return;
     this.client = google.accounts.oauth2.initTokenClient({ client_id: GOOGLE_CLIENT_ID, scope: SCOPES,
       callback: r => { const p=this.pending; this.pending=null; if (r.error){ p?.rej(new Error(r.error_description||r.error)); return; }
-        localStorage.setItem(LS.token, JSON.stringify({ token:r.access_token, exp: Date.now() + (Number(r.expires_in)||3600)*1000 })); p?.res(r.access_token); },
+        const rec=C.saveToken(r, Date.now(), this.email()); this.write(rec); this.scheduleWarning(); p?.res(r.access_token); this.rememberEmail(rec.access_token); },
       error_callback: e => { const p=this.pending; this.pending=null; p?.rej(new Error(e?.type==='popup_closed'?'Sign-in window closed':(e?.message||'Sign-in failed'))); } }); },
-  /** Call from a tap. prompt:'' re-uses earlier consent (usually no screen); 'consent' shows the chooser. */
-  request(prompt=''){ // kept synchronous when GIS is preloaded, so Safari treats the popup as part of the tap
-    const go=()=>new Promise((res,rej)=>{ this.pending={res,rej}; this.client.requestAccessToken({prompt}); });
+  /** Drive about is already in scope. Save user.emailAddress as the login hint. */
+  rememberEmail(expected){ Google.whoami().then(u=>{ const email=String(u&&u.emailAddress||'').trim(); if(!email) return;
+    const cur=this.record(); const tok=cur&&(cur.access_token||cur.token); if(!cur||(expected&&tok!==expected)||cur.email===email) return;
+    this.write({...cur, email}); }).catch(()=>{}); },
+  /** Call from a tap. prompt:'' with login_hint skips the picker; never call this without a tap (iOS blocks the popup). */
+  request(prompt='', hint){ // synchronous when GIS is preloaded, so Safari treats the popup as part of the tap
+    const useHint = hint!==false && prompt!=='select_account' && prompt!=='consent';
+    const login = useHint ? String(hint||this.email()||'') : '';
+    const go=()=>new Promise((res,rej)=>{ this.pending={res,rej}; const opts={prompt:prompt||''}; if(login) opts.login_hint=login; this.client.requestAccessToken(opts); });
     return this.client ? go() : this.init().then(go); },
-  signOut(){ const t=this.saved(); if (t && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(t, ()=>{}); this.clear(); },
+  scheduleWarning(){ clearTimeout(this._warnTimer); clearTimeout(this._expTimer); const rec=this.record(); const exp=rec&&Number(rec.exp); if(!exp) return;
+    const now=Date.now(); this._warnTimer=setTimeout(()=>this.syncWarning(), Math.max(0, exp-now-C.TOKEN_WARN_MS)); if(exp>now) this._expTimer=setTimeout(()=>this.syncWarning(), exp-now+50); },
+  syncWarning(){ if(S.mode!=='google') return; const rec=this.record(); const now=Date.now(); const visible=document.visibilityState==='visible';
+    if(rec && Number(rec.exp) && now>=Number(rec.exp) && visible && S.data){ this.invalidate(); S.needAuth=true; render(); return; }
+    const warn=visible && C.tokenWarning(rec, now); if(warn!==!!S.sessionEnding){ S.sessionEnding=warn; if(S.data) render(); } },
+  signOut(){ const rec=this.record(); const t=rec&&(rec.access_token||rec.token); if(t && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(t, ()=>{}); this.clear(); },
 };
 class NeedAuth extends Error { constructor(){ super('Google session expired'); this.needAuth=true; } }
 
@@ -421,7 +479,7 @@ const colLetter = i => { let s=''; i++; while(i>0){ const m=(i-1)%26; s=String.f
 const Google = {
   async api(url, opts={}){ const tok=Auth.saved(); if(!tok) throw new NeedAuth();
     const r=await fetch(url,{...opts, headers:{...(opts.headers||{}), Authorization:'Bearer '+tok}});
-    if (r.status===401){ Auth.clear(); throw new NeedAuth(); }
+    if (r.status===401){ Auth.invalidate(); throw new NeedAuth(); }
     if (!r.ok){ let m=r.status+' '+r.statusText; try{ const j=await r.json(); m=j.error?.message||m; }catch(e){} throw new Error(m); }
     return r; },
   json(url,opts){ return this.api(url,opts).then(r=>r.json()); },
@@ -577,15 +635,32 @@ async function refresh(quiet){
   S.loading=false; render();
 }
 function onNeedAuth(){ if (S.needAuth) return; S.needAuth=true; render(); }
-async function reconnect(){ try{ await Auth.request(''); S.needAuth=false; S.notice=null; await refresh(); }catch(e){ toast(e.message); } }
-
-/* ---------- start-up ---------- */
-async function startDemo(){ S.mode='demo'; B=Demo; if (!params.has('demo')) history.replaceState(null,'','?demo=1'); await refresh(); }
-async function startGoogle(interactive){
+/** prompt '' + login hint is the silent one-tap path. Must be called from a tap. */
+async function signInWith(prompt, hint){
+  const fromApp = S.mode==='google' && !!S.data;
   S.mode='google'; B=Google;
   try{
-    if (interactive) await Auth.request(Auth.saved()?'':'consent');
+    await Auth.request(prompt, hint);
     if (!Auth.saved()) throw new NeedAuth();
+    S.needAuth=false; S.sessionEnding=false; S.notice=null;
+    Auth.scheduleWarning();
+    if (!localStorage.getItem(LS.editor)){ const u=await Google.whoami(); const first=String(u.displayName||u.emailAddress||'me').trim().split(/[\s@.]+/)[0].toLowerCase(); localStorage.setItem(LS.editor, first||'me'); }
+    if (!Google.sheetId()){ const id=await chooseSheet(); if(!id){ S.mode=null; render(); return; } }
+    await refresh();
+  }catch(e){
+    if (fromApp){ S.needAuth=true; toast(e.needAuth?'Sign-in window closed':(e.message||'Sign-in failed')); render(); return; }
+    S.mode=null; S.notice = e.needAuth ? null : {err:true,text:e.message}; render();
+  }
+}
+
+/* ---------- start-up ---------- */
+async function startDemo(){ S.mode='demo'; B=Demo; S.sessionEnding=false; if (!params.has('demo')) history.replaceState(null,'','?demo=1'); await refresh(); }
+async function startGoogle(){
+  S.mode='google'; B=Google;
+  try{
+    if (!Auth.saved()) throw new NeedAuth();
+    Auth.scheduleWarning();
+    if (!Auth.email()) Auth.rememberEmail(Auth.saved());
     if (!localStorage.getItem(LS.editor)){ const u=await Google.whoami(); const first=String(u.displayName||u.emailAddress||'me').trim().split(/[\s@.]+/)[0].toLowerCase(); localStorage.setItem(LS.editor, first||'me'); }
     if (!Google.sheetId()){ const id=await chooseSheet(); if(!id){ S.mode=null; render(); return; } }
     await refresh();
@@ -627,12 +702,16 @@ function render(){
 function signInHTML(){
   const placeholder = !GOOGLE_CLIENT_ID || /YOUR_CLIENT_ID/.test(GOOGLE_CLIENT_ID);
   const secure = location.protocol==='https:' || location.hostname==='localhost' || location.hostname==='127.0.0.1';
+  const email = Auth.email();
   return `<div class="signin"><div class="logo">🍱</div><h1>Food Diary · 食記</h1>
     <p>A private photo food diary. Your entries and photos stay in your own Google Sheet and Drive. This page has no server and keeps only a cache on this device.</p>
     ${S.notice?`<div class="notice ${S.notice.err?'err':''}">${esc(S.notice.text)}</div>`:''}
     ${placeholder?`<div class="notice">Google sign-in isn't set up yet: paste your OAuth client ID into <code>GOOGLE_CLIENT_ID</code> (see SETUP.md).</div>`:''}
     ${!secure?`<div class="notice err">Google sign-in only works over https (not file://).</div>`:''}
-    <button class="btn primary" data-act="signin" ${placeholder||!secure?'disabled':''}>${Auth.saved()?'Continue':'Sign in with Google'}</button>
+    ${email
+      ? `<button class="btn primary" data-act="continue" ${placeholder||!secure?'disabled':''}>Continue as ${esc(email)}</button>
+         <button class="btn" data-act="other" ${placeholder||!secure?'disabled':''}>Use another account</button>`
+      : `<button class="btn primary" data-act="signin" ${placeholder||!secure?'disabled':''}>Sign in with Google</button>`}
     <button class="btn" data-act="demo">👀 Try the demo (sample data)</button>
     <button class="btn ghost" data-act="offline">Open offline copy</button>
     <p class="faint" style="font-size:12px;margin-top:18px">Signing in lets this page read and edit your food log sheet and the “${PHOTO_FOLDER}” folder in your Drive.</p></div>`;
@@ -645,7 +724,9 @@ function topbarHTML(){
 function bannersHTML(){
   let h='';
   if (S.mode==='demo') h+=`<div class="demo-banner">SAMPLE DATA · demo mode. Nothing here is real, and nothing is saved to Google.</div>`;
-  if (S.needAuth) h+=`<div class="notice">${S.offline?'You\'re viewing an offline copy.':'Your Google session has expired.'} <button class="btn" style="min-height:32px;padding:5px 12px;margin-left:6px" data-act="reconnect">Reconnect</button></div>`;
+  if (S.sessionEnding && !S.needAuth && S.mode==='google') h+=`<button class="notice" data-act="stay">Session ending, tap to stay signed in</button>`;
+  if (S.needAuth){ const email=Auth.email(); const act=email?'continue':'signin'; const label=email?`Continue as ${esc(email)}`:'Sign in with Google';
+    h+=`<div class="notice">${S.offline?'You\'re viewing an offline copy.':'Your Google session has expired.'} <button class="btn" style="min-height:32px;padding:5px 12px;margin-left:6px" data-act="${act}">${label}</button></div>`; }
   if (S.notice) h+=`<div class="notice ${S.notice.err?'err':''}">${esc(S.notice.text)} <button class="btn ghost" style="min-height:0;padding:0 6px" data-act="dismiss">✕</button></div>`;
   if (S.data && !S.data.writable && S.mode==='google') h+=`<div class="notice">Read-only: the “${TABS.food}” tab is missing column(s) ${esc(S.data.missing.join(', '))}. Editing switches on once the sheet uses the new format.</div>`;
   if (S.data?.targetsDefault) h+=`<div class="notice">No targets found in the “${TABS.targets}” tab, so generic defaults are shown.</div>`;
@@ -916,14 +997,17 @@ document.addEventListener('click', async ev=>{
   const step={prevday:-1,nextday:1,prevweek:-7,nextweek:7}[a];
   if (step){ S.date=C.addDays(S.date,step); S.month=S.date.slice(0,7); return render(); }
   switch(a){
-    case 'signin': return startGoogle(true);
+    case 'signin': return signInWith('consent', false);
+    case 'continue': return signInWith('', Auth.email());
+    case 'other': return signInWith('select_account', false);
+    case 'stay': return signInWith('', Auth.email());
     case 'demo': return startDemo();
     case 'offline': return openOffline();
     case 'view': S.view=el.dataset.v; scrollTo(0,0); return render();
     case 'openday': S.date=el.dataset.d; S.month=S.date.slice(0,7); S.view='day'; scrollTo(0,0); return render();
     case 'prevmonth': case 'nextmonth': S.month=C.addMonths(S.month, a==='prevmonth'?-1:1); S.date = today().startsWith(S.month)?today():S.month+'-01'; return render();
-    case 'refresh': return (S.needAuth&&S.mode==='google') ? reconnect() : refresh();
-    case 'reconnect': return reconnect();
+    case 'refresh': return (S.needAuth&&S.mode==='google') ? signInWith('', Auth.email()) : refresh();
+    case 'reconnect': return signInWith('', Auth.email());
     case 'dismiss': S.notice=null; return render();
     case 'add': return openEditor(null);
     case 'edit': { const e=S.data.entries.find(x=>x.entry_id===el.dataset.id); if (e) openEditor(e); return; }
@@ -934,7 +1018,7 @@ document.addEventListener('click', async ev=>{
     case 'changesheet': { localStorage.removeItem(LS.sheet); const id=await chooseSheet().catch(e=>{ if(e.needAuth) onNeedAuth(); return null; }); return id ? refresh() : render(); }
     case 'editor': { const v=prompt('Name written to the updated_by column when you edit (e.g. your first name):', editorTag()); if (v&&v.trim()) localStorage.setItem(LS.editor, v.trim().toLowerCase()); return render(); }
     case 'clearcache': await IDB.clear('photos'); toast('Photo cache cleared'); return render();
-    case 'signout': if (!confirm('Sign out and forget this sheet on this device?')) return; Auth.signOut(); [LS.sheet,LS.sheetName,LS.folder,LS.editor].forEach(k=>localStorage.removeItem(k)); await IDB.clear('photos'); await IDB.clear('kv'); S.mode=null; S.data=null; S.menu=false; return render();
+    case 'signout': if (!confirm('Sign out and forget this sheet on this device?')) return; Auth.signOut(); [LS.sheet,LS.sheetName,LS.folder,LS.editor].forEach(k=>localStorage.removeItem(k)); await IDB.clear('photos'); await IDB.clear('kv'); S.mode=null; S.data=null; S.needAuth=false; S.sessionEnding=false; S.menu=false; return render();
     case 'exitdemo': location.href=location.pathname; return;
   }
 });
@@ -945,7 +1029,7 @@ document.addEventListener('keydown', ev=>{ if (ev.key==='Escape' && $('#modal-ro
 (() => { let y0=null, dy=0; const ptr=$('#ptr');
   addEventListener('touchstart', e=>{ y0 = (scrollY<=0 && !editCtx && S.data) ? e.touches[0].clientY : null; dy=0; }, {passive:true});
   addEventListener('touchmove', e=>{ if (y0===null) return; dy=e.touches[0].clientY-y0; if (dy>0){ ptr.style.transform=`translate(-50%,${Math.min(dy,90)-60}px)`; ptr.textContent= dy>75?'↻ Release to refresh':'↓ Pull to refresh'; } }, {passive:true});
-  addEventListener('touchend', ()=>{ if (y0!==null && dy>75){ ptr.textContent='↻ Refreshing'; (S.needAuth&&S.mode==='google') ? reconnect() : refresh(true).then(()=>toast('Up to date')); } ptr.style.transform='translate(-50%,-60px)'; y0=null; }); })();
+  addEventListener('touchend', ()=>{ if (y0!==null && dy>75){ ptr.textContent='↻ Refreshing'; if (S.needAuth&&S.mode==='google') toast(Auth.email()?`Tap Continue as ${Auth.email()}`:'Tap Sign in with Google'); else refresh(true).then(()=>toast('Up to date')); } ptr.style.transform='translate(-50%,-60px)'; y0=null; }); })();
 
 /* home-screen icon, generated so there are no extra files */
 (() => { try{ const cv=document.createElement('canvas'); cv.width=cv.height=180; const g=cv.getContext('2d'); const gr=g.createLinearGradient(0,0,180,180); gr.addColorStop(0,'#e9a23b'); gr.addColorStop(1,'#d9653b'); g.fillStyle=gr; g.fillRect(0,0,180,180);
@@ -953,14 +1037,15 @@ document.addEventListener('keydown', ev=>{ if (ev.key==='Escape' && $('#modal-ro
   $('#touch-icon').href=cv.toDataURL('image/png'); }catch(e){} })();
 
 /* go */
-window.__fd = { S, C, render, refresh };   // handy for debugging from the console
+window.__fd = { S, C, render, refresh, Auth };   // handy for debugging from the console
+document.addEventListener('visibilitychange', ()=>{ if (S.mode==='google') Auth.syncWarning(); });
 if (params.get('demo')==='1') startDemo();
-else if (Auth.saved() && localStorage.getItem(LS.sheet) && !/YOUR_CLIENT_ID/.test(GOOGLE_CLIENT_ID)) {
-  S.mode='google'; B=Google; render();
-  IDB.get('kv','cache').then(c=>{ if (c && c.sheet===Google.sheetId() && !S.data){ ingest(c.raw); render(); } });
-  refresh(true);
+else if (Auth.saved() && !/YOUR_CLIENT_ID/.test(GOOGLE_CLIENT_ID)) {
+  S.mode='google'; B=Google; Auth.scheduleWarning(); render();
+  if (localStorage.getItem(LS.sheet)) IDB.get('kv','cache').then(c=>{ if (c && c.sheet===Google.sheetId() && !S.data){ ingest(c.raw); render(); } });
+  startGoogle();
 } else render();
-if (params.get('demo')!=='1' && !/YOUR_CLIENT_ID/.test(GOOGLE_CLIENT_ID)) Auth.init().catch(()=>{}); // preload Google sign-in
+if (params.get('demo')!=='1' && !/YOUR_CLIENT_ID/.test(GOOGLE_CLIENT_ID)) Auth.init().catch(()=>{}); // preload Google sign-in so a later tap can open the popup
 })();
 </script>
 </body>

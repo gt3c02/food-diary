@@ -16,9 +16,9 @@ All data stays in **your own Google account**:
 - a Google Sheet whose name contains `Food & Weight Log`, with the tabs `Food log`, `Targets` and `Weight`
 - photos in a Drive folder called `Food Diary Photos`
 
-After you sign in, the page finds the sheet by name, or asks you to paste its URL. It stores the sheet ID and folder ID only in your browser's `localStorage`. This repository holds code only: no sheet IDs, personal data, API keys or tokens. The only setting in the code is `GOOGLE_CLIENT_ID`, which is a public OAuth client ID and not a secret.
+After you sign in, the page finds the sheet by name, or asks you to paste its URL. It stores the sheet ID, folder ID, and the sign-in token (plus your account email, only as a login hint) in this browser's `localStorage`. This repository holds code only: no sheet IDs, personal data, API keys or tokens. The only setting in the code is `GOOGLE_CLIENT_ID`, which is a public OAuth client ID and not a secret.
 
-The page talks straight to the Google Sheets v4 and Drive v3 APIs from your browser, using a short-lived access token from Google Identity Services. Photos you've viewed are cached in IndexedDB on your device so they load fast and also work offline.
+The page talks straight to the Google Sheets v4 and Drive v3 APIs from your browser, using a short-lived access token from Google Identity Services. You stay signed in on this device for about an hour, so opening the page again does not ask you to sign in. A few minutes before the hour is up, if the page is open, a banner says **Session ending, tap to stay signed in**. After it expires, one tap on **Continue as** your account signs you back in. The page never opens a Google window by itself. Photos you've viewed are cached in IndexedDB on your device so they load fast and also work offline.
 
 ## Food log format
 

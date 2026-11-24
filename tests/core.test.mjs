@@ -136,6 +136,49 @@ test('isDiaryHidden matches meal_type snack, any case', () => {
   assert.equal(C.isDiaryHidden({ meal_type:'breakfast' }), false);
 });
 
+test('token record: save, read, expiry skew, and clear', () => {
+  const now = 1_700_000_000_000;
+  const saved = C.saveToken({ access_token:'tok-1', expires_in:1800, scope:'sheets drive' }, now, 'user@example.com');
+  assert.equal(saved.access_token, 'tok-1');
+  assert.equal(saved.exp, now + 1800 * 1000);
+  assert.equal(saved.scopes, 'sheets drive');
+  assert.equal(saved.email, 'user@example.com');
+  assert.equal(C.TOKEN_SKEW_MS, 2 * 60 * 1000);
+  assert.equal(C.TOKEN_WARN_MS, 5 * 60 * 1000);
+  const fallback = C.saveToken({ access_token:'tok-2', scopes:['a','b'] }, now, '  user@example.com  ');
+  assert.equal(fallback.exp, now + 3600 * 1000, 'missing expires_in defaults to one hour');
+  assert.equal(fallback.scopes, 'a b');
+  assert.equal(fallback.email, 'user@example.com');
+
+  assert.equal(C.readToken(saved, now), 'tok-1');
+  assert.equal(C.readToken(saved, saved.exp - C.TOKEN_SKEW_MS - 1), 'tok-1', 'more than 2 minutes left');
+  assert.equal(C.readToken(saved, saved.exp - C.TOKEN_SKEW_MS), null, 'exactly 2 minutes left is inside the skew');
+  assert.equal(C.readToken(saved, saved.exp - 90 * 1000), null, '90 seconds left is not used');
+  assert.equal(C.readToken(saved, saved.exp), null);
+  assert.equal(C.readToken({ token:'legacy', exp: now + 10 * 60 * 1000 }, now), 'legacy');
+  assert.equal(C.readToken(null, now), null);
+  assert.equal(C.readToken({ access_token:'', exp: now + 999999 }, now), null);
+
+  const soon = { access_token:'tok-1', exp: now + 4 * 60 * 1000, email:'user@example.com' };
+  assert.equal(C.tokenWarning(soon, now), true);
+  assert.equal(C.readToken(soon, now), 'tok-1', '4 minutes left is still used');
+  const skew = { access_token:'tok-1', exp: now + 90 * 1000, email:'user@example.com' };
+  assert.equal(C.tokenWarning(skew, now), true);
+  assert.equal(C.readToken(skew, now), null, 'inside the 2 minute skew the banner can show but the token is not reused');
+  assert.equal(C.tokenWarning({ access_token:'tok-1', exp: now + C.TOKEN_WARN_MS }, now), true);
+  assert.equal(C.tokenWarning({ access_token:'tok-1', exp: now + C.TOKEN_WARN_MS + 1 }, now), false);
+  assert.equal(C.tokenWarning({ access_token:'tok-1', exp: now }, now), false);
+
+  assert.equal(C.clearToken(saved), null);
+  const kept = C.clearToken(saved, true);
+  assert.equal(kept.access_token, '');
+  assert.equal(kept.exp, 0);
+  assert.equal(kept.scopes, '');
+  assert.equal(kept.email, 'user@example.com');
+  assert.equal(C.readToken(kept, now), null);
+  assert.equal(C.clearToken({ access_token:'tok-1', exp: saved.exp }, true), null, 'no email to keep');
+});
+
 test('totals still include diary-hidden rows', () => {
   const h = C.HEADER.slice();
   const rows = [h,
